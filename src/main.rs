@@ -1,33 +1,71 @@
-use cargo::core::{enable_nightly_features, GitReference, SourceId, Workspace};
-use cargo::util::Sha256;
-use cargo::util::{CargoResult, CargoResultExt, Config};
-use docopt::Docopt;
-use failure::bail;
-use serde::{Deserialize, Serialize};
-use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fs::{self, File};
-use std::hash::Hasher;
-use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
+use std::{
+    collections::{hash_map::DefaultHasher, BTreeMap, BTreeSet, HashMap},
+    fs::{self, File},
+    hash::Hasher,
+    io::{self, Read, Write},
+    path::{Path, PathBuf},
+};
 
-#[derive(Deserialize)]
+use anyhow::{bail, Context};
+use cargo::{
+    core::{GitReference, SourceId, Workspace},
+    sources::path::PathSource,
+    util::{CargoResult, Config},
+};
+use cargo_util::Sha256;
+use clap::Parser;
+use serde::Serialize;
+
+/// Vendor all dependencies for a project locally
+#[derive(Parser)]
+#[command(name = "cargo-vendor", version)]
+#[command(about = "Vendor all dependencies for a project locally")]
 struct Options {
-    arg_path: Option<String>,
-    flag_no_delete: Option<bool>,
-    flag_version: bool,
-    flag_sync: Option<Vec<String>>,
-    flag_verbose: u32,
-    flag_quiet: Option<bool>,
-    flag_explicit_version: Option<bool>,
-    flag_color: Option<String>,
-    flag_frozen: bool,
-    flag_locked: bool,
-    flag_disallow_duplicates: bool,
-    flag_relative_path: bool,
-    flag_only_git_deps: bool,
-    flag_no_merge_sources: bool,
-    flag_vendor_main_crate: bool,
+    /// Where to vendor crates (`vendor` by default)
+    #[arg(default_value_t = String::from("vendor"))]
+    path: String,
+    /// Don't delete older crates in the vendor directory
+    #[arg(long)]
+    no_delete: bool,
+    /// Sync one or more `Cargo.toml` or `Cargo.lock`
+    #[arg(long, value_name = "TOML")]
+    sync: Option<Vec<String>>,
+    /// Always include version in subdir name
+    #[arg(long)]
+    versioned_dirs: bool,
+    /// Use verbose output
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    verbose: u8,
+    /// No output printed to stdout
+    #[arg(short, long)]
+    quiet: bool,
+    /// Coloring: auto, always, never
+    #[arg(long, value_name = "WHEN")]
+    color: Option<String>,
+    /// Require Cargo.lock and cache are up to date
+    #[arg(long)]
+    frozen: bool,
+    /// Require Cargo.lock is up to date
+    #[arg(long)]
+    locked: bool,
+    /// Run without accessing the network
+    #[arg(long)]
+    offline: bool,
+    /// Disallow two versions of one crate
+    #[arg(long)]
+    disallow_duplicates: bool,
+    /// Use relative vendor path for .cargo/config
+    #[arg(long)]
+    relative_path: bool,
+    /// Only vendor git dependencies, not crates.io dependencies
+    #[arg(long)]
+    only_git_deps: bool,
+    /// Keep sources separate
+    #[arg(long)]
+    no_merge_sources: bool,
+    /// Vendor the main crate as well (additionally to its dependencies)
+    #[arg(long)]
+    vendor_main_crate: bool,
 }
 
 #[derive(Serialize)]
@@ -65,54 +103,10 @@ fn main() {
     // to respect any of the `source` configuration in Cargo itself. That's
     // intended for other consumers of Cargo, but we want to go straight to the
     // source, e.g. crates.io, to fetch crates.
-    let mut config = {
-        let config_orig = Config::default().unwrap();
-        let mut values = config_orig.values().unwrap().clone();
-        values.remove("source");
-        let config = Config::default().unwrap();
-        config.set_values(values).unwrap();
-        config
-    };
+    let mut config = Config::default().unwrap();
+    config.values_mut().unwrap().remove("source");
 
-    let usage = r#"
-Vendor all dependencies for a project locally
-
-Usage:
-    cargo vendor [options] [<path>]
-
-Options:
-    -h, --help               Print this message
-    -V, --version            Print version information
-    -s, --sync TOML ...      Sync one or more `Cargo.toml` or `Cargo.lock`
-    -v, --verbose ...        Use verbose output
-    -q, --quiet              No output printed to stdout
-    -x, --explicit-version   Always include version in subdir name
-    --disallow-duplicates    Disallow two versions of one crate
-    --no-delete              Don't delete older crates in the vendor directory
-    --only-git-deps          Only vendor git dependencies, not crates.io dependencies
-    --frozen                 Require Cargo.lock and cache are up to date
-    --locked                 Require Cargo.lock is up to date
-    --color WHEN             Coloring: auto, always, never
-    --relative-path          Use relative vendor path for .cargo/config
-    --no-merge-sources       Keep sources separate
-    --vendor-main-crate      Vendor the main crate as well (additionally to its
-                             dependencies)
-
-This cargo subcommand will vendor all crates.io dependencies for a project into
-the specified directory at `<path>`. The `cargo vendor` command is intended to
-be run in the same directory as `Cargo.toml`, but the manifest can also be
-specified via one or more instances of the `--sync` flag. After this command
-completes the vendor directory specified by `<path>` will contain all sources
-from crates.io necessary to build the manifests specified.
-
-The `cargo vendor` command will also print out the configuration necessary
-to use the vendored sources, which when needed is then encoded into
-`.cargo/config`.
-"#;
-
-    let options = Docopt::new(usage)
-        .and_then(|d| d.deserialize())
-        .unwrap_or_else(|e| e.exit());
+    let options = Options::parse();
     let result = real_main(options, &mut config);
     if let Err(e) = result {
         cargo::exit_with_error(e.into(), &mut *config.shell());
@@ -120,45 +114,36 @@ to use the vendored sources, which when needed is then encoded into
 }
 
 fn real_main(options: Options, config: &mut Config) -> CargoResult<()> {
-    if options.flag_version {
-        println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
-        return Ok(());
-    }
-
-    // We're not too interested in gating users based on nightly features or
-    // not, so just assume they're all enabled in the version of Cargo we're
-    // using.
-    enable_nightly_features();
-
     config.configure(
-        options.flag_verbose,
-        options.flag_quiet,
-        &options.flag_color,
-        options.flag_frozen,
-        options.flag_locked,
+        options.verbose.into(),
+        options.quiet,
+        options.color.as_deref(),
+        options.frozen,
+        options.locked,
+        options.offline,
         &None, // target_dir,
-        &[],
+        &[],   // unstable_flags,
+        &[],   // cli_config,
     )?;
 
-    let default = "vendor".to_string();
-    let path = Path::new(options.arg_path.as_ref().unwrap_or(&default));
+    let path = Path::new(&options.path);
 
     let sources_file = path.join(SOURCES_FILE_NAME);
     let is_multi_sources = sources_file.exists();
-    if is_multi_sources && !options.flag_no_merge_sources
-        || !is_multi_sources && options.flag_no_merge_sources
+    if is_multi_sources && !options.no_merge_sources
+        || !is_multi_sources && options.no_merge_sources
     {
         fs::remove_dir_all(path).ok();
     }
 
-    fs::create_dir_all(&path).chain_err(|| format!("failed to create: `{}`", path.display()))?;
+    fs::create_dir_all(&path).with_context(|| format!("failed to create: `{}`", path.display()))?;
 
-    if !is_multi_sources && options.flag_no_merge_sources {
+    if !is_multi_sources && options.no_merge_sources {
         let mut file = File::create(sources_file)?;
         file.write_all(serde_json::json!([]).to_string().as_bytes())?;
     }
 
-    let workspaces = match options.flag_sync {
+    let workspaces = match options.sync {
         Some(list) => list
             .iter()
             .map(|path| {
@@ -181,17 +166,17 @@ fn real_main(options: Options, config: &mut Config) -> CargoResult<()> {
         &workspaces,
         &path,
         config,
-        options.flag_explicit_version.unwrap_or(false),
-        options.flag_no_delete.unwrap_or(false),
-        options.flag_disallow_duplicates,
-        options.flag_relative_path,
-        options.flag_only_git_deps,
-        !options.flag_no_merge_sources,
-        options.flag_vendor_main_crate,
+        options.versioned_dirs,
+        options.no_delete,
+        options.disallow_duplicates,
+        options.relative_path,
+        options.only_git_deps,
+        !options.no_merge_sources,
+        options.vendor_main_crate,
     )
-    .chain_err(|| format!("failed to sync"))?;
+    .with_context(|| format!("failed to sync"))?;
 
-    if !options.flag_quiet.unwrap_or(false) {
+    if !options.quiet {
         eprint!("To use vendored sources, add this to your .cargo/config for this project:\n\n");
         print!("{}", &toml::to_string(&vendor_config).unwrap());
     }
@@ -228,7 +213,7 @@ fn sync(
     // crate to work with.
     for ws in workspaces {
         let (packages, resolve) =
-            cargo::ops::resolve_ws(&ws).chain_err(|| "failed to load pkg lockfile")?;
+            cargo::ops::resolve_ws(&ws).with_context(|| "failed to load pkg lockfile")?;
 
         packages.get_many(resolve.iter())?;
 
@@ -251,7 +236,7 @@ fn sync(
     for ws in workspaces {
         let main_pkg = ws.current().map(|x| x.name().as_str()).unwrap_or("");
         let (packages, resolve) =
-            cargo::ops::resolve_ws(&ws).chain_err(|| "failed to load pkg lockfile")?;
+            cargo::ops::resolve_ws(&ws).with_context(|| "failed to load pkg lockfile")?;
 
         packages.get_many(resolve.iter())?;
 
@@ -270,7 +255,7 @@ fn sync(
                 pkg.clone(),
                 packages
                     .get_one(pkg)
-                    .chain_err(|| "failed to fetch package")?
+                    .with_context(|| "failed to fetch package")?
                     .clone(),
             );
 
@@ -286,11 +271,8 @@ fn sync(
 
         match map.get(&id.version()) {
             Some(prev) if merge_sources => bail!(
-                "found duplicate version of package `{} v{}` \
-                 vendored from two sources:\n\
-                 \n\
-                 \tsource 1: {}\n\
-                 \tsource 2: {}",
+                "found duplicate version of package `{} v{}` vendored from two \
+                 sources:\n\n\tsource 1: {}\n\tsource 2: {}",
                 id.name(),
                 id.version(),
                 prev,
@@ -340,9 +322,8 @@ fn sync(
         let dst_name = if dir_has_version_suffix {
             if !explicit_version && disallow_duplicates {
                 bail!(
-                    "found duplicate versions of package `{}` \
-                     at {} and {}, but this was disallowed via \
-                     --disallow-duplicates",
+                    "found duplicate versions of package `{}` at {} and {}, but this was \
+                     disallowed via --disallow-duplicates",
                     pkg.name(),
                     id.version(),
                     max_version
@@ -367,7 +348,7 @@ fn sync(
         };
         if sources.insert(id.source_id()) && !merge_sources {
             fs::create_dir_all(&source_dir)
-                .chain_err(|| format!("failed to create: `{}`", source_dir.display()))?;
+                .with_context(|| format!("failed to create: `{}`", source_dir.display()))?;
         }
         let dst = source_dir.join(&dst_name);
         added_crates.push(dst.clone());
@@ -384,11 +365,11 @@ fn sync(
         )?;
 
         let _ = fs::remove_dir_all(&dst);
-        let pathsource = cargo::sources::path::PathSource::new(&src, id.source_id(), config);
+        let pathsource = PathSource::new(src, id.source_id(), config);
         let paths = pathsource.list_files(&pkg)?;
         let mut map = BTreeMap::new();
         cp_sources(&src, &paths, &dst, &mut map)
-            .chain_err(|| format!("failed to copy over vendored sources for: {}", id))?;
+            .with_context(|| format!("failed to copy over vendored sources for: {}", id))?;
 
         // Finally, emit the metadata about this package
         let json = serde_json::json!({
@@ -452,7 +433,7 @@ fn sync(
 
     // replace original sources with vendor
     for source_id in sources {
-        let name = if source_id.is_default_registry() {
+        let name = if source_id.is_crates_io() {
             "crates-io".to_string()
         } else {
             source_id.url().to_string()
@@ -478,7 +459,7 @@ fn sync(
             continue;
         }
 
-        let source = if source_id.is_default_registry() {
+        let source = if source_id.is_crates_io() {
             VendorSource::Registry {
                 registry: None,
                 replace_with: replace_name,
@@ -492,6 +473,7 @@ fn sync(
                     GitReference::Branch(ref b) => branch = Some(b.clone()),
                     GitReference::Tag(ref t) => tag = Some(t.clone()),
                     GitReference::Rev(ref r) => rev = Some(r.clone()),
+                    GitReference::DefaultBranch => {}
                 }
             }
             VendorSource::Git {
@@ -551,7 +533,7 @@ fn cp_sources(
         fs::create_dir_all(dst.parent().unwrap())?;
 
         fs::copy(&p, &dst)
-            .chain_err(|| format!("failed to copy `{}` to `{}`", p.display(), dst.display()))?;
+            .with_context(|| format!("failed to copy `{}` to `{}`", p.display(), dst.display()))?;
         cksums.insert(relative.to_str().unwrap().replace("\\", "/"), sha256(&dst)?);
     }
     Ok(())

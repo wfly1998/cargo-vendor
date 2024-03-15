@@ -1,12 +1,16 @@
 extern crate once_cell;
 
-use std::env;
-use std::fs::{self, File};
-use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::{
+    env,
+    fs::{self, File},
+    io::{Read, Write},
+    path::{Path, PathBuf},
+    process::Command,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex, MutexGuard,
+    },
+};
 
 use once_cell::sync::OnceCell;
 
@@ -20,13 +24,13 @@ fn vendor(dir: &Path) -> Command {
     let mut cmd = Command::new(&me);
     cmd.arg("vendor");
     cmd.current_dir(dir);
-    return cmd
+    return cmd;
 }
 
 static CNT: AtomicUsize = AtomicUsize::new(0);
 
 fn dir() -> (PathBuf, MutexGuard<'static, ()>) {
-    static S: OnceCell<Mutex<()>> = OnceCell::INIT;
+    static S: OnceCell<Mutex<()>> = OnceCell::new();
     let i = CNT.fetch_add(1, Ordering::SeqCst);
     let mut dir = env::current_exe().unwrap();
     dir.pop();
@@ -48,41 +52,59 @@ fn file(dir: &Path, path: &str, contents: &str) {
     let path = dir.join(path);
     println!("writing {:?}", path);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
-    File::create(path).unwrap().write_all(contents.as_bytes()).unwrap();
+    File::create(path)
+        .unwrap()
+        .write_all(contents.as_bytes())
+        .unwrap();
 }
 
 fn read(path: &Path) -> String {
     let mut contents = String::new();
-    File::open(path).unwrap().read_to_string(&mut contents).unwrap();
-	contents
+    File::open(path)
+        .unwrap()
+        .read_to_string(&mut contents)
+        .unwrap();
+    contents
 }
 
 fn run(cmd: &mut Command) -> (String, String) {
     println!("running {:?}", cmd);
     let output = cmd.output().unwrap();
     println!("status: {}", output.status);
-    println!("stdout: ----------\n{}", String::from_utf8_lossy(&output.stdout));
-    println!("stderr: ----------\n{}", String::from_utf8_lossy(&output.stderr));
+    println!(
+        "stdout: ----------\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    println!(
+        "stderr: ----------\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     if !output.status.success() {
         panic!("not successful: {}", output.status);
     }
 
-    (String::from_utf8(output.stdout).unwrap(),
-     String::from_utf8(output.stderr).unwrap())
+    (
+        String::from_utf8(output.stdout).unwrap(),
+        String::from_utf8(output.stderr).unwrap(),
+    )
 }
 
 #[test]
 fn vendor_simple() {
     let (dir, _lock) = dir();
 
-    file(&dir, "Cargo.toml", r#"
+    file(
+        &dir,
+        "Cargo.toml",
+        r#"
         [package]
         name = "foo"
         version = "0.1.0"
 
         [dependencies]
         log = "=0.3.5"
-    "#);
+    "#,
+    );
     file(&dir, "src/lib.rs", "");
 
     run(&mut vendor(&dir));
@@ -94,13 +116,16 @@ fn vendor_simple() {
 }
 
 fn add_vendor_config(dir: &Path) {
-    add_specific_vendor_config(dir, r#"
+    add_specific_vendor_config(
+        dir,
+        r#"
         [source.crates-io]
         replace-with = 'vendor'
 
         [source.vendor]
         directory = 'vendor'
-    "#);
+    "#,
+    );
 }
 
 fn add_specific_vendor_config(dir: &Path, config: &str) {
@@ -116,7 +141,10 @@ fn assert_vendor_works(dir: &Path) {
 fn two_versions() {
     let (dir, _lock) = dir();
 
-    file(&dir, "Cargo.toml", r#"
+    file(
+        &dir,
+        "Cargo.toml",
+        r#"
         [package]
         name = "foo"
         version = "0.1.0"
@@ -124,16 +152,21 @@ fn two_versions() {
         [dependencies]
         bitflags = "=0.8.0"
         bar = { path = "bar" }
-    "#);
+    "#,
+    );
     file(&dir, "src/lib.rs", "");
-    file(&dir, "bar/Cargo.toml", r#"
+    file(
+        &dir,
+        "bar/Cargo.toml",
+        r#"
         [package]
         name = "bar"
         version = "0.1.0"
 
         [dependencies]
         bitflags = "=0.7.0"
-    "#);
+    "#,
+    );
     file(&dir, "bar/src/lib.rs", "");
 
     run(&mut vendor(&dir));
@@ -155,14 +188,18 @@ fn help() {
 fn update_versions() {
     let (dir, _lock) = dir();
 
-    file(&dir, "Cargo.toml", r#"
+    file(
+        &dir,
+        "Cargo.toml",
+        r#"
         [package]
         name = "foo"
         version = "0.1.0"
 
         [dependencies]
         bitflags = "=0.7.0"
-    "#);
+    "#,
+    );
     file(&dir, "src/lib.rs", "");
 
     run(&mut vendor(&dir));
@@ -170,14 +207,18 @@ fn update_versions() {
     let lock = read(&dir.join("vendor/bitflags/Cargo.toml"));
     assert!(lock.contains("version = \"0.7.0\""));
 
-    file(&dir, "Cargo.toml", r#"
+    file(
+        &dir,
+        "Cargo.toml",
+        r#"
         [package]
         name = "foo"
         version = "0.1.0"
 
         [dependencies]
         bitflags = "=0.8.0"
-    "#);
+    "#,
+    );
     run(&mut vendor(&dir));
 
     let lock = read(&dir.join("vendor/bitflags/Cargo.toml"));
@@ -188,28 +229,38 @@ fn update_versions() {
 fn two_lockfiles() {
     let (dir, _lock) = dir();
 
-    file(&dir, "foo/Cargo.toml", r#"
+    file(
+        &dir,
+        "foo/Cargo.toml",
+        r#"
         [package]
         name = "foo"
         version = "0.1.0"
 
         [dependencies]
         bitflags = "=0.7.0"
-    "#);
+    "#,
+    );
     file(&dir, "foo/src/lib.rs", "");
-    file(&dir, "bar/Cargo.toml", r#"
+    file(
+        &dir,
+        "bar/Cargo.toml",
+        r#"
         [package]
         name = "bar"
         version = "0.1.0"
 
         [dependencies]
         bitflags = "=0.8.0"
-    "#);
+    "#,
+    );
     file(&dir, "bar/src/lib.rs", "");
 
-    run(vendor(&dir).arg("-s").arg("foo/Cargo.toml")
-                    .arg("-s").arg("bar/Cargo.toml")
-                    );
+    run(vendor(&dir)
+        .arg("--sync")
+        .arg("foo/Cargo.toml")
+        .arg("--sync")
+        .arg("bar/Cargo.toml"));
 
     let lock = read(&dir.join("vendor/bitflags/Cargo.toml"));
     assert!(lock.contains("version = \"0.8.0\""));
@@ -217,22 +268,30 @@ fn two_lockfiles() {
     assert!(lock.contains("version = \"0.7.0\""));
 
     add_vendor_config(&dir);
-    run(Command::new("cargo").arg("build").current_dir(&dir.join("foo")));
-    run(Command::new("cargo").arg("build").current_dir(&dir.join("bar")));
+    run(Command::new("cargo")
+        .arg("build")
+        .current_dir(&dir.join("foo")));
+    run(Command::new("cargo")
+        .arg("build")
+        .current_dir(&dir.join("bar")));
 }
 
 #[test]
 fn revendor_with_config() {
     let (dir, _lock) = dir();
 
-    file(&dir, "Cargo.toml", r#"
+    file(
+        &dir,
+        "Cargo.toml",
+        r#"
         [package]
         name = "foo"
         version = "0.1.0"
 
         [dependencies]
         bitflags = "=0.7.0"
-    "#);
+    "#,
+    );
     file(&dir, "src/lib.rs", "");
 
     run(&mut vendor(&dir));
@@ -240,14 +299,18 @@ fn revendor_with_config() {
     assert!(lock.contains("version = \"0.7.0\""));
 
     add_vendor_config(&dir);
-    file(&dir, "Cargo.toml", r#"
+    file(
+        &dir,
+        "Cargo.toml",
+        r#"
         [package]
         name = "foo"
         version = "0.1.0"
 
         [dependencies]
         bitflags = "=0.8.0"
-    "#);
+    "#,
+    );
     run(&mut vendor(&dir));
     let lock = read(&dir.join("vendor/bitflags/Cargo.toml"));
     assert!(lock.contains("version = \"0.8.0\""));
@@ -257,27 +320,35 @@ fn revendor_with_config() {
 fn delete_old_crates() {
     let (dir, _lock) = dir();
 
-    file(&dir, "Cargo.toml", r#"
+    file(
+        &dir,
+        "Cargo.toml",
+        r#"
         [package]
         name = "foo"
         version = "0.1.0"
 
         [dependencies]
         bitflags = "=0.7.0"
-    "#);
+    "#,
+    );
     file(&dir, "src/lib.rs", "");
 
     run(&mut vendor(&dir));
     read(&dir.join("vendor/bitflags/Cargo.toml"));
 
-    file(&dir, "Cargo.toml", r#"
+    file(
+        &dir,
+        "Cargo.toml",
+        r#"
         [package]
         name = "foo"
         version = "0.1.0"
 
         [dependencies]
         log = "=0.3.5"
-    "#);
+    "#,
+    );
 
     run(&mut vendor(&dir));
     let lock = read(&dir.join("vendor/log/Cargo.toml"));
@@ -289,14 +360,18 @@ fn delete_old_crates() {
 fn ignore_files() {
     let (dir, _lock) = dir();
 
-    file(&dir, "Cargo.toml", r#"
+    file(
+        &dir,
+        "Cargo.toml",
+        r#"
         [package]
         name = "foo"
         version = "0.1.0"
 
         [dependencies]
         url = "=1.4.1"
-    "#);
+    "#,
+    );
     file(&dir, "src/lib.rs", "");
 
     run(&mut vendor(&dir));
@@ -308,7 +383,10 @@ fn ignore_files() {
 fn included_files_only() {
     let (dir, _lock) = dir();
     // Use a fixed commit so we know what files are excluded.
-    file(&dir, "Cargo.toml", r#"
+    file(
+        &dir,
+        "Cargo.toml",
+        r#"
         [package]
         name = "foo"
         version = "0.1.0"
@@ -316,7 +394,8 @@ fn included_files_only() {
         [dependencies.libc]
         git = "https://github.com/rust-lang/libc"
         rev = "b95fa265332df919e53eb66de5e6bd37fcd94041"
-    "#);
+    "#,
+    );
     file(&dir, "src/lib.rs", "");
 
     run(&mut vendor(&dir));
@@ -329,7 +408,10 @@ fn included_files_only() {
 fn dependent_crates_in_crates() {
     let (dir, _lock) = dir();
 
-    file(&dir, "Cargo.toml", r#"
+    file(
+        &dir,
+        "Cargo.toml",
+        r#"
         [package]
         name = "foo"
         version = "0.1.0"
@@ -337,7 +419,8 @@ fn dependent_crates_in_crates() {
         [dependencies.winapi]
         git = 'https://github.com/retep998/winapi-rs/'
         rev = '3792048cb07f9b762f8f0913293027759ea78db2'
-    "#);
+    "#,
+    );
     file(&dir, "src/lib.rs", "");
 
     run(&mut vendor(&dir));
@@ -352,7 +435,10 @@ fn dependent_crates_in_crates() {
 fn vendoring_git_crates() {
     let (dir, _lock) = dir();
 
-    file(&dir, "Cargo.toml", r#"
+    file(
+        &dir,
+        "Cargo.toml",
+        r#"
         [package]
         name = "foo"
         version = "0.1.0"
@@ -365,26 +451,30 @@ fn vendoring_git_crates() {
 
         [patch.crates-io]
         serde_derive = { git = "https://github.com/servo/serde", branch = "deserialize_from_enums8" }
-    "#);
+    "#,
+    );
     file(&dir, "src/lib.rs", "");
 
-    run(&mut vendor(&dir)
-        .env("CARGO_HOME", &dir.join("cargo_home")));
+    run(&mut vendor(&dir).env("CARGO_HOME", &dir.join("cargo_home")));
 }
 
 #[test]
 fn git_simple() {
     let (dir, _lock) = dir();
 
-    file(&dir, "Cargo.toml", r#"
+    file(
+        &dir,
+        "Cargo.toml",
+        r#"
         [package]
         name = "foo"
         version = "0.1.0"
 
         [dependencies.futures]
-        git = 'https://github.com/alexcrichton/futures-rs'
+        git = 'https://github.com/rust-lang/futures-rs'
         rev = '03a0005cb6498e4330'
-    "#);
+    "#,
+    );
     file(&dir, "src/lib.rs", "");
 
     run(&mut vendor(&dir));
@@ -396,7 +486,10 @@ fn git_simple() {
 fn git_duplicate() {
     let (dir, _lock) = dir();
 
-    file(&dir, "Cargo.toml", r#"
+    file(
+        &dir,
+        "Cargo.toml",
+        r#"
         [package]
         name = "foo"
         version = "0.1.0"
@@ -405,9 +498,10 @@ fn git_duplicate() {
         futures = "=0.1.15"
 
         [dependencies.futures-cpupool]
-        git = 'https://github.com/alexcrichton/futures-rs'
+        git = 'https://github.com/rust-lang/futures-rs'
         rev = '03a0005cb6498e4330'
-    "#);
+    "#,
+    );
     file(&dir, "src/lib.rs", "");
 
     let output = vendor(&dir).output().unwrap();
@@ -420,7 +514,10 @@ fn git_duplicate() {
 fn git_only() {
     let (dir, _lock) = dir();
 
-    file(&dir, "Cargo.toml", r#"
+    file(
+        &dir,
+        "Cargo.toml",
+        r#"
         [package]
         name = "foo"
         version = "0.1.0"
@@ -429,15 +526,15 @@ fn git_only() {
         log = "=0.3.5"
 
         [dependencies.futures]
-        git = 'https://github.com/alexcrichton/futures-rs'
+        git = 'https://github.com/rust-lang/futures-rs'
         rev = '03a0005cb6498e4330'
-    "#);
+    "#,
+    );
     file(&dir, "src/lib.rs", "");
 
     run(&mut vendor(&dir));
     let output = vendor(&dir)
         .arg("--only-git")
-
         .output()
         .expect("failed to run cargo-vendor");
     if output.status.success() {
@@ -449,14 +546,16 @@ fn git_only() {
 
     let csum = read(&dir.join("vendor/futures/.cargo-checksum.json"));
     assert!(csum.contains("\"package\":null"));
-
 }
 
 #[test]
 fn two_versions_disallowed() {
     let (dir, _lock) = dir();
 
-    file(&dir, "Cargo.toml", r#"
+    file(
+        &dir,
+        "Cargo.toml",
+        r#"
         [package]
         name = "foo"
         version = "0.1.0"
@@ -464,21 +563,25 @@ fn two_versions_disallowed() {
         [dependencies]
         bitflags = "=0.8.0"
         bar = { path = "bar" }
-    "#);
+    "#,
+    );
     file(&dir, "src/lib.rs", "");
-    file(&dir, "bar/Cargo.toml", r#"
+    file(
+        &dir,
+        "bar/Cargo.toml",
+        r#"
         [package]
         name = "bar"
         version = "0.1.0"
 
         [dependencies]
         bitflags = "=0.7.0"
-    "#);
+    "#,
+    );
     file(&dir, "bar/src/lib.rs", "");
 
     let output = vendor(&dir)
         .arg("--disallow-duplicates")
-
         .output()
         .expect("failed to run cargo-vendor");
     if output.status.success() {
@@ -490,19 +593,26 @@ fn two_versions_disallowed() {
 fn depend_on_vendor_dir_not_deleted() {
     let (dir, _lock) = dir();
 
-    file(&dir, "Cargo.toml", r#"
+    file(
+        &dir,
+        "Cargo.toml",
+        r#"
         [package]
         name = "foo"
         version = "0.1.0"
 
         [dependencies]
         libc = "=0.2.30"
-    "#);
+    "#,
+    );
     file(&dir, "src/lib.rs", "");
 
     run(&mut vendor(&dir));
 
-    file(&dir, "Cargo.toml", r#"
+    file(
+        &dir,
+        "Cargo.toml",
+        r#"
         [package]
         name = "foo"
         version = "0.1.0"
@@ -512,7 +622,8 @@ fn depend_on_vendor_dir_not_deleted() {
 
         [patch.crates-io]
         libc = { path = 'vendor/libc' }
-    "#);
+    "#,
+    );
 
     run(&mut vendor(&dir));
     assert!(dir.join("vendor/libc").is_dir());
@@ -522,7 +633,10 @@ fn depend_on_vendor_dir_not_deleted() {
 fn replace_section() {
     let (dir, _lock) = dir();
 
-    file(&dir, "Cargo.toml", r#"
+    file(
+        &dir,
+        "Cargo.toml",
+        r#"
         [package]
         name = "foo"
         version = "0.1.0"
@@ -533,7 +647,8 @@ fn replace_section() {
         [replace."libc:0.2.43"]
         git = "https://github.com/rust-lang/libc"
         rev = "add1a320b4e1b454794a034e3f4218f877c393fc"
-    "#);
+    "#,
+    );
     file(&dir, "src/lib.rs", "");
 
     let (output, _) = run(&mut vendor(&dir).arg("--no-merge-sources"));
@@ -545,14 +660,18 @@ fn replace_section() {
 fn switch_merged_source() {
     let (dir, _lock) = dir();
 
-    file(&dir, "Cargo.toml", r#"
+    file(
+        &dir,
+        "Cargo.toml",
+        r#"
         [package]
         name = "foo"
         version = "0.1.0"
 
         [dependencies]
         log = "=0.3.5"
-    "#);
+    "#,
+    );
     file(&dir, "src/lib.rs", "");
 
     // Start with multi sources
@@ -578,17 +697,21 @@ fn switch_merged_source() {
 fn main_crate_vendored() {
     let (dir, _lock) = dir();
 
-    file(&dir, "Cargo.toml", r#"
+    file(
+        &dir,
+        "Cargo.toml",
+        r#"
         [package]
         name = "foo"
         version = "0.1.0"
 
         [dependencies]
         log = "=0.3.5"
-    "#);
+    "#,
+    );
     file(&dir, "src/lib.rs", "");
 
-    let (output, _) = run(&mut vendor(&dir).arg("--vendor-main-crate"));
+    let _ = run(&mut vendor(&dir).arg("--vendor-main-crate"));
     assert!(dir.join("vendor/log").is_dir());
     assert!(dir.join("vendor/foo").is_dir());
 }
@@ -597,7 +720,10 @@ fn main_crate_vendored() {
 fn path_dependency_ignored_when_main_crate_vendored() {
     let (dir, _lock) = dir();
 
-    file(&dir, "Cargo.toml", r#"
+    file(
+        &dir,
+        "Cargo.toml",
+        r#"
         [package]
         name = "foo"
         version = "0.1.0"
@@ -605,18 +731,23 @@ fn path_dependency_ignored_when_main_crate_vendored() {
         [dependencies]
         log = "=0.3.5"
         subcrate = { path = "subcrate" }
-    "#);
+    "#,
+    );
     file(&dir, "src/lib.rs", "");
 
-    file(&dir, "subcrate/Cargo.toml", r#"[package]
+    file(
+        &dir,
+        "subcrate/Cargo.toml",
+        r#"[package]
         name = "subcrate"
         version = "0.1.0"
 
         [dependencies]
-    "#);
+    "#,
+    );
     file(&dir, "subcrate/src/lib.rs", "");
 
-    let (output, _) = run(&mut vendor(&dir).arg("--vendor-main-crate"));
+    let _ = run(&mut vendor(&dir).arg("--vendor-main-crate"));
     assert!(dir.join("vendor/log").is_dir());
     assert!(dir.join("vendor/foo").is_dir());
     assert!(!dir.join("vendor/subcrate").is_dir());
