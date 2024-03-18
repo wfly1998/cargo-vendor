@@ -54,9 +54,6 @@ struct Options {
     /// Disallow two versions of one crate
     #[arg(long)]
     disallow_duplicates: bool,
-    /// Use relative vendor path for .cargo/config
-    #[arg(long)]
-    relative_path: bool,
     /// Only vendor git dependencies, not crates.io dependencies
     #[arg(long)]
     only_git_deps: bool,
@@ -164,7 +161,6 @@ fn real_main(options: Options, config: &mut Config) -> CargoResult<()> {
         options.versioned_dirs,
         options.no_delete,
         options.disallow_duplicates,
-        options.relative_path,
         options.only_git_deps,
         options.vendor_main_crate,
     )
@@ -185,7 +181,6 @@ fn sync(
     explicit_version: bool,
     no_delete: bool,
     disallow_duplicates: bool,
-    use_relative_path: bool,
     only_git_deps: bool,
     vendor_main_crate: bool,
 ) -> CargoResult<VendorConfig> {
@@ -383,11 +378,7 @@ fn sync(
     serde_json::to_writer(file, &new_sources)?;
 
     // add our vendored source
-    let dir = if use_relative_path {
-        local_dst.to_path_buf()
-    } else {
-        config.cwd().join(local_dst)
-    };
+    let dir = local_dst.to_path_buf();
     let mut config = BTreeMap::new();
 
     // replace original sources with vendor
