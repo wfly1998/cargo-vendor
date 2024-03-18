@@ -496,6 +496,65 @@ fn cp_sources(
             .with_context(|| format!("failed to copy `{}` to `{}`", p.display(), dst.display()))?;
         cksums.insert(relative.to_str().unwrap().replace("\\", "/"), sha256(&dst)?);
     }
+
+    match (src.parent(), dst.parent()) {
+        (Some(srcp), Some(dstp)) => {
+            // Copy `Cargo.toml` in its parent for git source using its workspace config.
+            cp_if_exists(&srcp, &dstp, "Cargo.toml")?;
+            // If the `Cargo.toml` is also a crate, we should also copy its `lib.rs`
+            cp_if_exists(&srcp, &dstp, "src/lib.rs")?;
+            // ... or its `bin` directory
+            cp_if_exists(&srcp, &dstp, "src/bin")?;
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+fn cp_if_exists(src: &Path, dst: &Path, name: &str) -> CargoResult<()> {
+    let sf = src.join(name);
+    let df = dst.join(name);
+
+    // It has been copied, maybe
+    if df.exists() {
+        return Ok(());
+    }
+
+    // Not exist, ignore and return
+    if !sf.exists() {
+        return Ok(());
+    }
+
+    // Copy directory recursively
+    if sf.is_dir() {
+        copy_dir_all(&sf, &df)?;
+        return Ok(());
+    }
+
+    // Copy file
+    if let Some(dir) = df.parent() {
+        // Create its parent directory (and grandparent, maybe)
+        fs::create_dir_all(dir)?;
+    }
+    fs::copy(&sf, &df)
+        .with_context(|| format!("failed to copy `{}` to `{}`", sf.display(), df.display()))?;
+
+    Ok(())
+}
+
+fn copy_dir_all(src: &PathBuf, dst: &PathBuf) -> CargoResult<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        if ty.is_dir() {
+            copy_dir_all(&entry.path(), &dst.join(entry.file_name()))?;
+        } else {
+            fs::copy(entry.path(), dst.join(entry.file_name()))
+                .with_context(|| format!("failed to copy `{:?}` to `{}`", entry, dst.display(),))?;
+        }
+    }
     Ok(())
 }
 
