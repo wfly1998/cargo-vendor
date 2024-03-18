@@ -60,9 +60,6 @@ struct Options {
     /// Only vendor git dependencies, not crates.io dependencies
     #[arg(long)]
     only_git_deps: bool,
-    /// Keep sources separate
-    #[arg(long)]
-    no_merge_sources: bool,
     /// Vendor the main crate as well (additionally to its dependencies)
     #[arg(long)]
     vendor_main_crate: bool,
@@ -130,15 +127,13 @@ fn real_main(options: Options, config: &mut Config) -> CargoResult<()> {
 
     let sources_file = path.join(SOURCES_FILE_NAME);
     let is_multi_sources = sources_file.exists();
-    if is_multi_sources && !options.no_merge_sources
-        || !is_multi_sources && options.no_merge_sources
-    {
+    if !is_multi_sources {
         fs::remove_dir_all(path).ok();
     }
 
     fs::create_dir_all(&path).with_context(|| format!("failed to create: `{}`", path.display()))?;
 
-    if !is_multi_sources && options.no_merge_sources {
+    if !is_multi_sources {
         let mut file = File::create(sources_file)?;
         file.write_all(serde_json::json!([]).to_string().as_bytes())?;
     }
@@ -171,7 +166,6 @@ fn real_main(options: Options, config: &mut Config) -> CargoResult<()> {
         options.disallow_duplicates,
         options.relative_path,
         options.only_git_deps,
-        !options.no_merge_sources,
         options.vendor_main_crate,
     )
     .with_context(|| format!("failed to sync"))?;
@@ -193,7 +187,6 @@ fn sync(
     disallow_duplicates: bool,
     use_relative_path: bool,
     only_git_deps: bool,
-    merge_sources: bool,
     vendor_main_crate: bool,
 ) -> CargoResult<VendorConfig> {
     let canonical_local_dst = local_dst.canonicalize().unwrap_or(local_dst.to_path_buf());
@@ -268,33 +261,15 @@ fn sync(
     let mut versions = HashMap::new();
     for id in ids.keys() {
         let map = versions.entry(id.name()).or_insert_with(BTreeMap::default);
-
-        match map.get(&id.version()) {
-            Some(prev) if merge_sources => bail!(
-                "found duplicate version of package `{} v{}` vendored from two \
-                 sources:\n\n\tsource 1: {}\n\tsource 2: {}",
-                id.name(),
-                id.version(),
-                prev,
-                id.source_id()
-            ),
-            _ => {}
-        }
         map.insert(id.version(), id.source_id());
     }
 
-    let source_paths = if merge_sources {
-        let mut set = BTreeSet::new();
-        set.insert(canonical_local_dst.clone());
-        set
-    } else {
-        let sources_file = canonical_local_dst.join(SOURCES_FILE_NAME);
-        let file = File::open(&sources_file)?;
-        serde_json::from_reader::<_, BTreeSet<PathBuf>>(file)?
-            .into_iter()
-            .map(|p| canonical_local_dst.join(p))
-            .collect()
-    };
+    let sources_file = canonical_local_dst.join(SOURCES_FILE_NAME);
+    let file = File::open(&sources_file)?;
+    let source_paths = serde_json::from_reader::<_, BTreeSet<PathBuf>>(file)?
+        .into_iter()
+        .map(|p| canonical_local_dst.join(p))
+        .collect::<Vec<_>>();
 
     let existing_crates: Vec<PathBuf> = source_paths
         .iter()
@@ -341,12 +316,8 @@ fn sync(
             continue;
         }
 
-        let source_dir = if merge_sources {
-            canonical_local_dst.clone()
-        } else {
-            canonical_local_dst.join(source_id_to_dir_name(id.source_id()))
-        };
-        if sources.insert(id.source_id()) && !merge_sources {
+        let source_dir = canonical_local_dst.join(source_id_to_dir_name(id.source_id()));
+        if sources.insert(id.source_id()) {
             fs::create_dir_all(&source_dir)
                 .with_context(|| format!("failed to create: `{}`", source_dir.display()))?;
         }
@@ -388,30 +359,28 @@ fn sync(
         }
     }
 
-    if !merge_sources {
-        let sources_file = canonical_local_dst.join(SOURCES_FILE_NAME);
-        let file = File::open(&sources_file)?;
-        let mut new_sources: BTreeSet<String> = sources
-            .iter()
-            .map(|src_id| source_id_to_dir_name(*src_id))
-            .collect();
-        let old_sources: BTreeSet<String> = serde_json::from_reader::<_, BTreeSet<String>>(file)?
-            .difference(&new_sources)
-            .map(|e| e.clone())
-            .collect();
-        for dir_name in old_sources {
-            let path = canonical_local_dst.join(dir_name.clone());
-            if path.is_dir() {
-                if path.read_dir()?.next().is_none() {
-                    fs::remove_dir(path)?;
-                } else {
-                    new_sources.insert(dir_name.clone());
-                }
+    let sources_file = canonical_local_dst.join(SOURCES_FILE_NAME);
+    let file = File::open(&sources_file)?;
+    let mut new_sources: BTreeSet<String> = sources
+        .iter()
+        .map(|src_id| source_id_to_dir_name(*src_id))
+        .collect();
+    let old_sources: BTreeSet<String> = serde_json::from_reader::<_, BTreeSet<String>>(file)?
+        .difference(&new_sources)
+        .map(|e| e.clone())
+        .collect();
+    for dir_name in old_sources {
+        let path = canonical_local_dst.join(dir_name.clone());
+        if path.is_dir() {
+            if path.read_dir()?.next().is_none() {
+                fs::remove_dir(path)?;
+            } else {
+                new_sources.insert(dir_name.clone());
             }
         }
-        let file = File::create(sources_file)?;
-        serde_json::to_writer(file, &new_sources)?;
     }
+    let file = File::create(sources_file)?;
+    serde_json::to_writer(file, &new_sources)?;
 
     // add our vendored source
     let dir = if use_relative_path {
@@ -421,16 +390,6 @@ fn sync(
     };
     let mut config = BTreeMap::new();
 
-    let merged_source_name = "vendored-sources";
-    if merge_sources {
-        config.insert(
-            merged_source_name.to_string(),
-            VendorSource::Directory {
-                directory: dir.clone(),
-            },
-        );
-    }
-
     // replace original sources with vendor
     for source_id in sources {
         let name = if source_id.is_crates_io() {
@@ -439,20 +398,14 @@ fn sync(
             source_id.url().to_string()
         };
 
-        let replace_name = if !merge_sources {
-            format!("vendor+{}", name)
-        } else {
-            merged_source_name.to_string()
-        };
+        let replace_name = format!("vendor+{}", name);
 
-        if !merge_sources {
-            let src_id_string = source_id_to_dir_name(source_id);
-            let src_dir = dir.join(src_id_string.clone());
-            config.insert(
-                replace_name.clone(),
-                VendorSource::Directory { directory: src_dir },
-            );
-        }
+        let src_id_string = source_id_to_dir_name(source_id);
+        let src_dir = dir.join(src_id_string.clone());
+        config.insert(
+            replace_name.clone(),
+            VendorSource::Directory { directory: src_dir },
+        );
 
         // if source id is a path and vendor_main_crate, skip the source replacement
         if source_id.is_path() && vendor_main_crate {
