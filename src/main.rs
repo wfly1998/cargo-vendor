@@ -392,8 +392,8 @@ fn sync(
 
     // replace original sources with vendor
     for source_id in sources {
-        let name = if source_id.is_crates_io() {
-            "crates-io".to_string()
+        let name = if source_id.is_registry() {
+            source_id.display_registry_name()
         } else {
             source_id.url().to_string()
         };
@@ -412,10 +412,17 @@ fn sync(
             continue;
         }
 
-        let source = if source_id.is_crates_io() {
-            VendorSource::Registry {
-                registry: None,
-                replace_with: replace_name,
+        let source = if source_id.is_registry() {
+            if source_id.is_crates_io() {
+                VendorSource::Registry {
+                    registry: None,
+                    replace_with: replace_name,
+                }
+            } else {
+                VendorSource::Registry {
+                    registry: Some(source_id.url().to_string()),
+                    replace_with: replace_name,
+                }
             }
         } else if source_id.is_git() {
             let mut branch = None;
