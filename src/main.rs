@@ -1,18 +1,19 @@
 use std::{
     collections::{hash_map::DefaultHasher, BTreeMap, BTreeSet, HashMap},
-    fs::{self, File},
+    ffi::OsStr,
+    fs::{self, File, OpenOptions},
     hash::Hasher,
-    io::{self, Read, Write},
+    io::{Read, Write},
     path::{Path, PathBuf},
 };
 
 use anyhow::{bail, Context};
 use cargo::{
-    core::{GitReference, SourceId, Workspace},
+    core::{package::MANIFEST_PREAMBLE, GitReference, Package, SourceId, Workspace},
     sources::path::PathSource,
     util::{CargoResult, Config},
 };
-use cargo_util::Sha256;
+use cargo_util::{paths, Sha256};
 use clap::Parser;
 use serde::Serialize;
 
@@ -281,6 +282,7 @@ fn sync(
         .collect();
 
     let mut sources = BTreeSet::new();
+    let mut tmp_buf = [0; 64 * 1024];
     for (id, pkg) in ids.iter() {
         // Next up, copy it to the vendor directory
         let src = pkg
@@ -334,7 +336,7 @@ fn sync(
         let pathsource = PathSource::new(src, id.source_id(), config);
         let paths = pathsource.list_files(&pkg)?;
         let mut map = BTreeMap::new();
-        cp_sources(&src, &paths, &dst, &mut map)
+        cp_sources(&pkg, &src, &paths, &dst, &mut map, &mut tmp_buf)
             .with_context(|| format!("failed to copy over vendored sources for: {}", id))?;
 
         // Finally, emit the metadata about this package
@@ -444,10 +446,12 @@ fn sync(
 }
 
 fn cp_sources(
+    pkg: &Package,
     src: &Path,
     paths: &Vec<PathBuf>,
     dst: &Path,
     cksums: &mut BTreeMap<String, String>,
+    tmp_buf: &mut [u8],
 ) -> CargoResult<()> {
     for p in paths {
         let relative = p.strip_prefix(&src).unwrap();
@@ -481,72 +485,75 @@ fn cp_sources(
             .iter()
             .fold(dst.to_owned(), |acc, component| acc.join(&component));
 
-        fs::create_dir_all(dst.parent().unwrap())?;
-
-        fs::copy(&p, &dst)
-            .with_context(|| format!("failed to copy `{}` to `{}`", p.display(), dst.display()))?;
-        cksums.insert(relative.to_str().unwrap().replace("\\", "/"), sha256(&dst)?);
-    }
-
-    match (src.parent(), dst.parent()) {
-        (Some(srcp), Some(dstp)) => {
-            // Copy `Cargo.toml` in its parent for git source using its workspace config.
-            cp_if_exists(&srcp, &dstp, "Cargo.toml")?;
-            // If the `Cargo.toml` is also a crate, we should also copy its `lib.rs`
-            cp_if_exists(&srcp, &dstp, "src/lib.rs")?;
-            // ... or its `bin` directory
-            cp_if_exists(&srcp, &dstp, "src/bin")?;
-        }
-        _ => {}
-    }
-
-    Ok(())
-}
-
-fn cp_if_exists(src: &Path, dst: &Path, name: &str) -> CargoResult<()> {
-    let sf = src.join(name);
-    let df = dst.join(name);
-
-    // It has been copied, maybe
-    if df.exists() {
-        return Ok(());
-    }
-
-    // Not exist, ignore and return
-    if !sf.exists() {
-        return Ok(());
-    }
-
-    // Copy directory recursively
-    if sf.is_dir() {
-        copy_dir_all(&sf, &df)?;
-        return Ok(());
-    }
-
-    // Copy file
-    if let Some(dir) = df.parent() {
-        // Create its parent directory (and grandparent, maybe)
-        fs::create_dir_all(dir)?;
-    }
-    fs::copy(&sf, &df)
-        .with_context(|| format!("failed to copy `{}` to `{}`", sf.display(), df.display()))?;
-
-    Ok(())
-}
-
-fn copy_dir_all(src: &PathBuf, dst: &PathBuf) -> CargoResult<()> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        if ty.is_dir() {
-            copy_dir_all(&entry.path(), &dst.join(entry.file_name()))?;
+        paths::create_dir_all(dst.parent().unwrap())?;
+        let mut dst_opts = OpenOptions::new();
+        dst_opts.write(true).create(true).truncate(true);
+        // When vendoring git dependencies, the manifest has not been normalized like it would be
+        // when published. This causes issue when the manifest is using workspace inheritance.
+        // To get around this issue we use the "original" manifest after `{}.workspace = true`
+        // has been resolved for git dependencies.
+        let cksum = if dst.file_name() == Some(OsStr::new("Cargo.toml"))
+            && pkg.package_id().source_id().is_git()
+        {
+            let original_toml = toml::to_string_pretty(pkg.manifest().original())?;
+            let contents = format!("{}\n{}", MANIFEST_PREAMBLE, original_toml);
+            copy_and_checksum(
+                &dst,
+                &mut dst_opts,
+                &mut contents.as_bytes(),
+                "Generated Cargo.toml",
+                tmp_buf,
+            )?
         } else {
-            fs::copy(entry.path(), dst.join(entry.file_name()))
-                .with_context(|| format!("failed to copy `{:?}` to `{}`", entry, dst.display(),))?;
-        }
+            let mut src = File::open(&p).with_context(|| format!("failed to open {:?}", &p))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+                let src_metadata = src
+                    .metadata()
+                    .with_context(|| format!("failed to stat {:?}", p))?;
+                dst_opts.mode(src_metadata.mode());
+            }
+            copy_and_checksum(
+                &dst,
+                &mut dst_opts,
+                &mut src,
+                &p.display().to_string(),
+                tmp_buf,
+            )?
+        };
+
+        cksums.insert(relative.to_str().unwrap().replace("\\", "/"), cksum);
     }
+
     Ok(())
+}
+
+fn copy_and_checksum<T: Read>(
+    dst_path: &Path,
+    dst_opts: &mut OpenOptions,
+    contents: &mut T,
+    contents_path: &str,
+    buf: &mut [u8],
+) -> CargoResult<String> {
+    let mut dst = dst_opts
+        .open(dst_path)
+        .with_context(|| format!("failed to create {:?}", dst_path))?;
+    // Not going to bother setting mode on pre-existing files, since there
+    // shouldn't be any under normal conditions.
+    let mut cksum = Sha256::new();
+    loop {
+        let n = contents
+            .read(buf)
+            .with_context(|| format!("failed to read from {:?}", contents_path))?;
+        if n == 0 {
+            break Ok(cksum.finish_hex());
+        }
+        let data = &buf[..n];
+        cksum.update(data);
+        dst.write_all(data)
+            .with_context(|| format!("failed to write to {:?}", dst_path))?;
+    }
 }
 
 fn source_id_to_dir_name(src_id: SourceId) -> String {
@@ -565,20 +572,6 @@ fn source_id_to_dir_name(src_id: SourceId) -> String {
         bytes[i] = (src_hash >> i * 8) as u8
     }
     format!("{}-{}", src_type, hex(&bytes))
-}
-
-fn sha256(p: &Path) -> io::Result<String> {
-    let mut file = File::open(p)?;
-    let mut sha = Sha256::new();
-    let mut buf = [0; 2048];
-    loop {
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        sha.update(&buf[..n]);
-    }
-    Ok(hex(&sha.finish()))
 }
 
 fn hex(bytes: &[u8]) -> String {
