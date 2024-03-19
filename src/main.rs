@@ -456,7 +456,7 @@ fn cp_sources(
     for p in paths {
         let relative = p.strip_prefix(&src).unwrap();
 
-        match relative.to_str() {
+        match relative.file_name().map(OsStr::to_str).flatten() {
             // Skip git config files as they're not relevant to builds most of
             // the time and if we respect them (e.g.  in git) then it'll
             // probably mess with the checksums when a vendor dir is checked
